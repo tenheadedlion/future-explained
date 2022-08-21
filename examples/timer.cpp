@@ -24,11 +24,7 @@ private:
   msd::channel<T> ch;
 };
 
-class TimerFuture : Future<int> {
-public:
-  Poll<int> poll() { return 42; }
-};
-
+class TimerFuture;
 class Task : std::enable_shared_from_this<Task> {
 public:
   template <class... Arg>
@@ -48,8 +44,67 @@ private:
   Task(const Task &) = delete;
 };
 
+struct Waker : std::enable_shared_from_this<Waker> {
+  [[nodiscard]] static std::shared_ptr<Waker> create() {
+    return std::shared_ptr<Waker>(new Waker());
+  }
+  void wake() {}
+
+private:
+  Waker() = default;
+};
+
+struct SharedState : std::enable_shared_from_this<SharedState> {
+  [[nodiscard]] static std::shared_ptr<SharedState> create() {
+    return std::shared_ptr<SharedState>(new SharedState());
+  }
+  bool completed;
+  std::shared_ptr<Waker> waker;
+  std::mutex mutex;
+
+private:
+  SharedState() : completed(false), waker(nullptr) {}
+};
+
 template <class T> using ChannelPtr = std::shared_ptr<Channel<T>>;
 using TaskPtr = std::shared_ptr<Task>;
+using SharedStatePtr = std::shared_ptr<SharedState>;
+
+class TimerFuture : Future<int> {
+public:
+  SharedStatePtr shared_state;
+  TimerFuture(int sec) {
+    shared_state = SharedState::create();
+    std::thread t([=] {
+      // this isolated thread must find a way to notify the world when it
+      // finishes the job
+      std::this_thread::sleep_for(std::chrono::seconds(sec));
+      std::lock_guard<std::mutex> guard(shared_state->mutex);
+      shared_state->completed = false;
+      // this waker
+      if (shared_state->waker.get()) {
+        shared_state->waker->wake();
+      }
+    });
+    t.detach();
+  }
+  // this method will be called by the executor.
+  // here's one problem, when the task is not completed, from whom the waker
+  // will be installed to the shared_state?
+  // this is simply a design choice, we make it different from the Rust
+  // strategy, we define the waker in TimeFuture, and we don't need `context`
+  // here
+  Poll<int> poll() {
+    std::lock_guard<std::mutex> guard(shared_state->mutex);
+    if (shared_state->completed) {
+      return Poll<int>(42, State::Ready);
+    } else {
+      auto waker = Waker::create();
+      shared_state->waker = waker;
+      return Poll<int>(42, State::Pending);
+    }
+  }
+};
 
 class Executor {
 public:
@@ -92,8 +147,8 @@ int main() {
   Executor executor(chan);
   Spawner spawner(chan);
 
-  auto future = std::make_unique<TimerFuture>();
-  auto future2 = std::make_unique<TimerFuture>();
+  auto future = std::make_unique<TimerFuture>(3);
+  auto future2 = std::make_unique<TimerFuture>(4);
   spawner.spawn(std::move(future));
   spawner.spawn(std::move(future2));
   spawner.drop();
