@@ -1,4 +1,4 @@
-# A Simple C++ Future Library
+# Explain Rust Future in 200 lines of C++
 
 ## Build
 
