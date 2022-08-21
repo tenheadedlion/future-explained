@@ -4,10 +4,8 @@
 #include <memory>
 #include <thread>
 
-struct Task;
 template <class T> class Channel : std::enable_shared_from_this<Channel<T>> {
 public:
-  std::shared_ptr<Channel<T>> getptr() { return this->shared_from_this(); }
   [[nodiscard]] static std::shared_ptr<Channel<T>> create() {
     return std::shared_ptr<Channel<T>>(new Channel());
   }
@@ -21,7 +19,7 @@ public:
 private:
   Channel() {
     const auto threads = std::thread::hardware_concurrency();
-    msd::channel<Task> msd_chan{threads};
+    msd::channel<T> msd_chan{threads};
   }
   msd::channel<T> ch;
 };
@@ -31,24 +29,36 @@ public:
   Poll<int> poll() { return 42; }
 };
 
-struct Task {
-  Task() : task_sender(nullptr), is_valid(true) {}
-  Task(TimerFuture future, std::shared_ptr<Channel<Task>> chan)
-      : future(future), task_sender(chan) {}
-  void set_eot() { is_valid = false; }
+class Task : std::enable_shared_from_this<Task> {
+public:
+  template <class... Arg>
+  [[nodiscard]] static std::shared_ptr<Task> create(Arg &&...args) {
+    return std::shared_ptr<Task>(new Task(std::forward<Arg>(args)...));
+  };
+
   bool is_valid;
-  TimerFuture future;
-  std::shared_ptr<Channel<Task>> task_sender;
+  std::unique_ptr<TimerFuture> future;
+  std::shared_ptr<Channel<std::shared_ptr<Task>>> task_sender;
+
+private:
+  Task() : future(nullptr), task_sender(nullptr), is_valid(true) {}
+  Task(std::unique_ptr<TimerFuture> future,
+       std::shared_ptr<Channel<std::shared_ptr<Task>>> chan)
+      : future(std::move(future)), task_sender(chan), is_valid(true) {}
+  Task(const Task &) = delete;
 };
 
-template <class T> class Executor {
+template <class T> using ChannelPtr = std::shared_ptr<Channel<T>>;
+using TaskPtr = std::shared_ptr<Task>;
+
+class Executor {
 public:
-  Executor(std::shared_ptr<Channel<Task>> chan) : chan(chan) {}
+  Executor(ChannelPtr<TaskPtr> chan) : chan(chan) {}
   void run() {
     while (true) {
-      Task task = chan->recv();
-      if (task.is_valid) {
-        std::cout << task.future.poll().data << std::endl;
+      TaskPtr task = chan->recv();
+      if (task->is_valid) {
+        std::cout << task->future->poll().data << std::endl;
       } else {
         return;
       }
@@ -56,33 +66,37 @@ public:
   }
 
 private:
-  std::shared_ptr<Channel<Task>> chan;
+  ChannelPtr<TaskPtr> chan;
 };
 
-template <class T> class Spawner {
+class Spawner {
 public:
-  Spawner(std::shared_ptr<Channel<Task>> chan) : chan(chan) {}
-  void spawn(TimerFuture future) {
-    Task task(future, chan);
+  Spawner(ChannelPtr<TaskPtr> chan) : chan(chan) {}
+  void drop() {
     // out of band data
-    Task eot(future, nullptr);
-    eot.set_eot();
-    chan->send(task);
+    TaskPtr eot = Task::create();
+    eot->is_valid = false;
     chan->send(eot);
+  }
+  void spawn(std::unique_ptr<TimerFuture> future) {
+    TaskPtr task = Task::create(std::move(future), chan);
+    chan->send(task);
   }
 
 private:
-  std::shared_ptr<Channel<Task>> chan;
+  ChannelPtr<TaskPtr> chan;
 };
 
 int main() {
-  TimerFuture tf;
-  auto chan = Channel<Task>::create();
-  Executor<Task> executor(chan);
-  Spawner<Task> spawner(chan);
+  auto chan = Channel<TaskPtr>::create();
+  Executor executor(chan);
+  Spawner spawner(chan);
 
-  TimerFuture future;
-  spawner.spawn(future);
+  auto future = std::make_unique<TimerFuture>();
+  auto future2 = std::make_unique<TimerFuture>();
+  spawner.spawn(std::move(future));
+  spawner.spawn(std::move(future2));
+  spawner.drop();
 
   executor.run();
 }
