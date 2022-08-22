@@ -9,10 +9,6 @@ template <class T> struct Poll {
 };
 
 struct Waker {
-  // we want the waker to send the task back to the executor.
-  // to archive that, the waker should hold the handle of the task,
-  // so we might as well let Task inherit Waker, and implement the wake() method
-  // itself
   virtual void wake() = 0;
 };
 

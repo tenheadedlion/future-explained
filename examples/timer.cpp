@@ -60,7 +60,14 @@ private:
   std::shared_ptr<Channel<T>> chan;
 };
 
+class Task;
+class SharedState;
 class TimerFuture;
+template <class T> using ReceiverPtr = std::shared_ptr<Receiver<T>>;
+template <class T> using SenderPtr = std::shared_ptr<Sender<T>>;
+template <class T> using ChannelPtr = std::shared_ptr<Channel<T>>;
+using TaskPtr = std::shared_ptr<Task>;
+using SharedStatePtr = std::shared_ptr<SharedState>;
 
 class Task : std::enable_shared_from_this<Task>, public Waker {
 public:
@@ -69,9 +76,8 @@ public:
     return std::shared_ptr<Task>(new Task(std::forward<Arg>(args)...));
   };
 
-  bool is_valid;
   std::unique_ptr<TimerFuture> future;
-  std::shared_ptr<Sender<std::shared_ptr<Task>>> task_sender;
+  SenderPtr<TaskPtr> task_sender;
 
   // We create a new task from the current task,
   // after that the current task is no longer valid
@@ -82,10 +88,9 @@ public:
   }
 
 private:
-  Task() : future(nullptr), task_sender(nullptr), is_valid(true) {}
-  Task(std::unique_ptr<TimerFuture> future,
-       std::shared_ptr<Sender<std::shared_ptr<Task>>> chan)
-      : future(std::move(future)), task_sender(chan), is_valid(true) {}
+  Task() : future(nullptr), task_sender(nullptr) {}
+  Task(std::unique_ptr<TimerFuture> future, SenderPtr<TaskPtr> chan)
+      : future(std::move(future)), task_sender(chan) {}
   Task(const Task &) = delete;
 };
 
@@ -101,10 +106,6 @@ private:
   SharedState() : completed(false), waker(nullptr) {}
 };
 
-template <class T> using ChannelPtr = std::shared_ptr<Channel<T>>;
-using TaskPtr = std::shared_ptr<Task>;
-using SharedStatePtr = std::shared_ptr<SharedState>;
-
 class TimerFuture : Future<int> {
 public:
   int sec;
@@ -117,7 +118,6 @@ public:
       std::this_thread::sleep_for(std::chrono::seconds(sec));
       std::lock_guard<std::mutex> guard(shared_state->mutex);
       shared_state->completed = true;
-      // this waker
       if (shared_state->waker.get()) {
         shared_state->waker->wake();
       }
@@ -129,8 +129,8 @@ public:
   // will be installed to the shared_state?
   // we can't get any useful information from TimeFuture unless we let
   // TimeFuture contain a reference to the task, but such design will make
-  // things complicated, therefore we need an external waker when calling this
-  // method(Rust's Context begins to make sense)
+  // things complicated, therefore we pass an external waker as argument when
+  // calling this method(Rust's Context begins to make sense)
   Poll<int> poll(std::shared_ptr<Waker> waker) {
     std::lock_guard<std::mutex> guard(shared_state->mutex);
     if (shared_state->completed) {
@@ -144,38 +144,34 @@ public:
 
 class Executor {
 public:
-  Executor(std::shared_ptr<Receiver<TaskPtr>> chan) : chan(chan) {}
+  Executor(ReceiverPtr<TaskPtr> chan) : chan(chan) {}
   void run() {
     while (!chan->closed()) {
       TaskPtr task = chan->recv();
-      if (task->is_valid) {
-        auto sec = task->future->sec;
-        // this is tricky, we pass the task as Waker
-        auto res = task->future->poll(task);
-        if (res.state == State::Ready) {
-          std::cout << sec << " seconds has expired!" << std::endl;
-        } else {
-        }
+      auto sec = task->future->sec;
+      // this is tricky, we pass the task as Waker
+      auto res = task->future->poll(task);
+      if (res.state == State::Ready) {
+        std::cout << sec << " seconds has expired!" << std::endl;
       } else {
-        return;
       }
     }
   }
 
 private:
-  std::shared_ptr<Receiver<TaskPtr>> chan;
+  ReceiverPtr<TaskPtr> chan;
 };
 
 class Spawner {
 public:
-  Spawner(std::shared_ptr<Sender<TaskPtr>> chan) : chan(chan) {}
+  Spawner(SenderPtr<TaskPtr> chan) : chan(chan) {}
   void spawn(std::unique_ptr<TimerFuture> future) {
     TaskPtr task = Task::create(std::move(future), chan);
     chan->send(task);
   }
 
 private:
-  std::shared_ptr<Sender<TaskPtr>> chan;
+  SenderPtr<TaskPtr> chan;
 };
 
 int main() {

@@ -1,11 +1,11 @@
-# Explain Rust Future in 200 lines of C++
+# A C++ implementation of Rust Future
 
 ## Build
 
 ```shell
 $ cmake -Bbuild -H.
 $ cd build
-$ make
+$ make && time ./timer
 ```
 
 ## Implementation
